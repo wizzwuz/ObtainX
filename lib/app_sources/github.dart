@@ -1649,8 +1649,9 @@ class GitHub extends AppSource {
     } else if (additionalSettings['extractVersionFromAssetName'] == true &&
         selectedFilteredApks.isNotEmpty) {
       version = extractVersion(
-        selectedFilteredApks.last.key,
         additionalSettings['versionExtractionRegEx'] as String?,
+        additionalSettings['matchGroupToUse'] as String?,
+        selectedFilteredApks.last.key,
       );
     } else if (additionalSettings['releaseTitleAsVersion'] == true &&
         runTitle != null &&
