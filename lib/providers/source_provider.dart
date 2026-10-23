@@ -2274,11 +2274,12 @@ class HttpService {
           String headerName,
           String headerValue,
         ) {
-          if (redirectCount > 0 &&
-              currentUrl.host != Uri.parse(url).host &&
-              headerName.toLowerCase() ==
-                  HttpHeaders.authorizationHeader.toLowerCase()) {
-            return;
+          if (redirectCount > 0 && currentUrl.host != Uri.parse(url).host) {
+            final lower = headerName.toLowerCase();
+            if (lower == HttpHeaders.authorizationHeader.toLowerCase() ||
+                lower.startsWith('x-github-')) {
+              return;
+            }
           }
           request.headers.set(headerName, headerValue);
         });

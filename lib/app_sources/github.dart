@@ -431,7 +431,16 @@ class GitHub extends AppSource {
       headers[HttpHeaders.authorizationHeader] = 'Bearer $token';
     }
     if (forAPKDownload == true) {
-      headers[HttpHeaders.acceptHeader] = 'application/octet-stream';
+      if (url.contains('/actions/artifacts/') ||
+          url.endsWith('/zip') ||
+          additionalSettings['getApkFromActionTab'] == true) {
+        headers[HttpHeaders.acceptHeader] = 'application/vnd.github+json';
+      } else {
+        headers[HttpHeaders.acceptHeader] = 'application/octet-stream';
+      }
+    }
+    if (url.contains('api.github.com')) {
+      headers['X-GitHub-Api-Version'] = '2022-11-28';
     }
     if (headers.isNotEmpty) {
       return headers;
