@@ -2269,10 +2269,17 @@ class HttpService {
             throw TimeoutException(tr('unexpectedError'), responseTimeout);
           },
         );
-        withDefaultObtainXUserAgent(requestHeaders).forEach((
+        final effectiveHeaders = withDefaultObtainXUserAgent(requestHeaders);
+        effectiveHeaders.forEach((
           String headerName,
           String headerValue,
         ) {
+          if (redirectCount > 0 &&
+              currentUrl.host != Uri.parse(url).host &&
+              headerName.toLowerCase() ==
+                  HttpHeaders.authorizationHeader.toLowerCase()) {
+            return;
+          }
           request.headers.set(headerName, headerValue);
         });
         request.cookies.addAll(cookies);

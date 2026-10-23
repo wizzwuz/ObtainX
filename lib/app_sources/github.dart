@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
@@ -260,6 +261,14 @@ class GitHub extends AppSource {
   @override
   List<List<GeneratedFormItem>>
   get additionalSourceAppSpecificSettingFormItems => [
+    [
+      GeneratedFormSwitch(
+        'getApkFromActionTab',
+        label: tr('getApkFromActionTab'),
+        value: false,
+        labelTooltip: tr('getApkFromActionTabTooltip'),
+      ),
+    ],
     [
       GeneratedFormSwitch(
         'includePrereleases',
@@ -1416,6 +1425,9 @@ class GitHub extends AppSource {
     Map<String, dynamic> additionalSettings,
   ) async {
     try {
+      if (additionalSettings['getApkFromActionTab'] == true) {
+        return await _fetchActionTabDetails(standardUrl, additionalSettings);
+      }
       return await fetchReleaseDetailsWithTagFallback(
         standardUrl,
         additionalSettings,
@@ -1429,6 +1441,300 @@ class GitHub extends AppSource {
     } catch (e) {
       rethrowOrWrapError(e);
     }
+  }
+
+  Future<APKDetails> _fetchActionTabDetails(
+    String standardUrl,
+    Map<String, dynamic> additionalSettings,
+  ) async {
+    final SettingsProvider settingsProvider = SettingsProvider();
+    await settingsProvider.initializeSettings();
+    final sourceConfigSettingValues = await getSourceConfigValues(
+      additionalSettings,
+      settingsProvider,
+    );
+    await checkForRepositoryRename(
+      standardUrl,
+      additionalSettings,
+      sourceConfigSettingValues,
+    );
+
+    final String? token = await getTokenIfAny(additionalSettings);
+    if (token == null || token.isEmpty) {
+      throw ObtainiumError(
+        tr('githubTokenRequiredForActionTab'),
+        code: 'TOKEN_REQUIRED',
+      );
+    }
+
+    final String apiUrl = await convertStandardUrlToAPIUrl(
+      standardUrl,
+      additionalSettings,
+    );
+    final String artifactsUrl = '$apiUrl/actions/artifacts?per_page=100';
+    final Response res = await sourceRequest(artifactsUrl, additionalSettings);
+    if (res.statusCode != 200) {
+      rateLimitErrorCheck(res);
+      throw getObtainiumHttpError(res);
+    }
+
+    final Map<String, dynamic>? decoded = _jsonObjectFromResponseBody(res.body);
+    final List<dynamic>? rawArtifacts = decoded?['artifacts'] as List<dynamic>?;
+    if (rawArtifacts == null || rawArtifacts.isEmpty) {
+      throw NoReleasesError();
+    }
+
+    final List<Map<String, dynamic>> validArtifacts = rawArtifacts
+        .whereType<Map<String, dynamic>>()
+        .where((a) => a['expired'] != true)
+        .toList();
+    if (validArtifacts.isEmpty) {
+      throw NoReleasesError();
+    }
+
+    // Group artifacts by workflow_run id, preserving chronological order (newest first)
+    final Map<int, List<Map<String, dynamic>>> artifactsByRun = {};
+    final Map<int, Map<String, dynamic>> runInfoMap = {};
+    for (final artifact in validArtifacts) {
+      final run = artifact['workflow_run'];
+      final int? runId = run is Map<String, dynamic> ? run['id'] as int? : null;
+      if (runId != null) {
+        artifactsByRun.putIfAbsent(runId, () => []).add(artifact);
+        runInfoMap.putIfAbsent(runId, () => run as Map<String, dynamic>);
+      }
+    }
+
+    if (artifactsByRun.isEmpty) {
+      throw NoReleasesError();
+    }
+
+    final bool fallbackToOlderReleases =
+        additionalSettings['fallbackToOlderReleases'] == true;
+    final String? regexFilter =
+        (additionalSettings['filterReleaseTitlesByRegEx'] as String?)
+                ?.isNotEmpty ==
+            true
+        ? additionalSettings['filterReleaseTitlesByRegEx']
+        : null;
+
+    int? selectedRunId;
+    List<Map<String, dynamic>>? selectedArtifacts;
+    List<MapEntry<String, String>>? selectedFilteredApks;
+    List<MapEntry<String, String>>? selectedAllAssetUrls;
+
+    final runIds = artifactsByRun.keys.toList();
+    for (int i = 0; i < runIds.length; i++) {
+      if (!fallbackToOlderReleases && i > 0) break;
+      final int runId = runIds[i];
+      final List<Map<String, dynamic>> runArtifacts = artifactsByRun[runId]!;
+      final Map<String, dynamic>? runInfo = runInfoMap[runId];
+      final String headBranch = runInfo?['head_branch']?.toString() ?? '';
+
+      // Check regexFilter against branch or artifact names if filter specified
+      if (regexFilter != null) {
+        final reg = RegExp(regexFilter);
+        final matchesBranch = reg.hasMatch(headBranch);
+        final matchesAnyArtifact = runArtifacts.any(
+          (a) => reg.hasMatch(a['name']?.toString() ?? ''),
+        );
+        if (!matchesBranch && !matchesAnyArtifact) {
+          continue;
+        }
+      }
+
+      final List<MapEntry<String, String>> allAssetUrls = [];
+      final List<MapEntry<String, String>> candidateApkUrls = [];
+
+      for (final artifact in runArtifacts) {
+        final String rawName = artifact['name']?.toString() ?? 'artifact';
+        final String displayName =
+            (rawName.toLowerCase().endsWith('.zip') ||
+                rawName.toLowerCase().endsWith('.apk'))
+            ? rawName
+            : '$rawName.zip';
+        final String rawDownloadUrl =
+            artifact['archive_download_url']?.toString() ??
+            '$apiUrl/actions/artifacts/${artifact['id']}/zip';
+        final String downloadUrl = undoGHProxyMod(
+          rawDownloadUrl,
+          sourceConfigSettingValues,
+        );
+        final entry = MapEntry(displayName, downloadUrl);
+        allAssetUrls.add(entry);
+        candidateApkUrls.add(entry);
+      }
+
+      final filteredApkUrls = filterApks(
+        candidateApkUrls,
+        additionalSettings['apkFilterRegEx'],
+        additionalSettings['invertAPKFilter'],
+      );
+
+      if (filteredApkUrls.isEmpty && additionalSettings['trackOnly'] != true) {
+        continue;
+      }
+
+      selectedRunId = runId;
+      selectedArtifacts = runArtifacts;
+      selectedFilteredApks = filteredApkUrls;
+      selectedAllAssetUrls = allAssetUrls;
+      break;
+    }
+
+    if (selectedRunId == null ||
+        selectedArtifacts == null ||
+        selectedFilteredApks == null ||
+        selectedAllAssetUrls == null) {
+      throw NoReleasesError();
+    }
+
+    final Map<String, dynamic>? runInfo = runInfoMap[selectedRunId];
+    final String headBranch = runInfo?['head_branch']?.toString() ?? '';
+    final String headSha = runInfo?['head_sha']?.toString() ?? '';
+
+    // Fetch target workflow run details to enrich changelog and title candidates
+    String? runTitle;
+    int? runNumber;
+    String? runHtmlUrl;
+    try {
+      final Response runRes = await sourceRequest(
+        '$apiUrl/actions/runs/$selectedRunId',
+        additionalSettings,
+      );
+      if (runRes.statusCode == 200) {
+        final Map<String, dynamic>? runData = _jsonObjectFromResponseBody(
+          runRes.body,
+        );
+        runTitle =
+            (runData?['display_title'] ?? runData?['name'])?.toString();
+        runNumber = runData?['run_number'] is int
+            ? runData!['run_number'] as int
+            : int.tryParse(runData?['run_number']?.toString() ?? '');
+        runHtmlUrl = runData?['html_url']?.toString();
+      }
+    } catch (_) {
+      // Non-critical metadata lookup failure
+    }
+
+    // Determine preferred artifact and date
+    Map<String, dynamic>? preferredArtifact;
+    if (selectedFilteredApks.isNotEmpty) {
+      final preferredKey = selectedFilteredApks.last.key;
+      for (final a in selectedArtifacts) {
+        final name = a['name']?.toString() ?? '';
+        if (name == preferredKey ||
+            '$name.zip' == preferredKey ||
+            name.replaceAll('.zip', '') == preferredKey.replaceAll('.zip', '')) {
+          preferredArtifact = a;
+          break;
+        }
+      }
+    }
+    preferredArtifact ??= selectedArtifacts.first;
+
+    final String? createdAtStr =
+        preferredArtifact['created_at']?.toString() ??
+        runInfo?['created_at']?.toString();
+    final DateTime? releaseDate =
+        createdAtStr != null ? DateTime.tryParse(createdAtStr) : null;
+
+    final rawSize = preferredArtifact['size_in_bytes'];
+    final int? apkSizeBytes = rawSize is num ? rawSize.toInt() : null;
+
+    // Resolve version string
+    String? version;
+    if (additionalSettings['releaseCommitShaAsVersion'] == true &&
+        headSha.isNotEmpty) {
+      version = headSha;
+    } else if (additionalSettings['extractVersionFromAssetName'] == true &&
+        selectedFilteredApks.isNotEmpty) {
+      version = extractVersion(
+        selectedFilteredApks.last.key,
+        additionalSettings['versionExtractionRegEx'] as String?,
+      );
+    } else if (additionalSettings['releaseTitleAsVersion'] == true &&
+        runTitle != null &&
+        runTitle.isNotEmpty) {
+      version = runTitle;
+    }
+
+    if (version == null || version.isEmpty) {
+      final String preferredName = selectedFilteredApks.isNotEmpty
+          ? selectedFilteredApks.last.key
+          : (preferredArtifact['name']?.toString() ?? '');
+      final assetVersionMatch =
+          releaseVersionPattern.firstMatch(preferredName)?.group(0);
+      final branchVersionMatch =
+          releaseVersionPattern.firstMatch(headBranch)?.group(0);
+      final titleVersionMatch = runTitle != null
+          ? releaseVersionPattern.firstMatch(runTitle)?.group(0)
+          : null;
+
+      final baseVersion =
+          assetVersionMatch ?? branchVersionMatch ?? titleVersionMatch;
+      if (baseVersion != null && baseVersion.isNotEmpty) {
+        version = baseVersion;
+      } else if (runNumber != null) {
+        version = 'v$runNumber';
+      } else if (headSha.isNotEmpty) {
+        version = headSha.substring(0, headSha.length > 7 ? 7 : headSha.length);
+      } else {
+        version = 'v1.0';
+      }
+    }
+
+    final StringBuffer changeLogBuf = StringBuffer();
+    if (runTitle != null && runTitle.isNotEmpty) {
+      changeLogBuf.writeln(runTitle);
+      changeLogBuf.writeln();
+    }
+    if (runNumber != null) {
+      changeLogBuf.writeln('Run #$runNumber');
+    }
+    if (headBranch.isNotEmpty) {
+      changeLogBuf.writeln('Branch: $headBranch');
+    }
+    if (headSha.isNotEmpty) {
+      changeLogBuf.writeln('Commit: $headSha');
+    }
+    if (runHtmlUrl != null && runHtmlUrl.isNotEmpty) {
+      changeLogBuf.writeln(runHtmlUrl);
+    }
+    final String changeLog = changeLogBuf.toString().trim();
+
+    final List<String> rawReleaseTitleCandidates = <String>[];
+    if (selectedFilteredApks.isNotEmpty) {
+      rawReleaseTitleCandidates.add(selectedFilteredApks.last.key);
+    }
+    if (headBranch.isNotEmpty &&
+        !rawReleaseTitleCandidates.contains(headBranch)) {
+      rawReleaseTitleCandidates.add(headBranch);
+    }
+    if (runTitle != null &&
+        runTitle.isNotEmpty &&
+        !rawReleaseTitleCandidates.contains(runTitle)) {
+      rawReleaseTitleCandidates.add(runTitle);
+    }
+    if (runNumber != null) {
+      final runStr = 'Run #$runNumber';
+      if (!rawReleaseTitleCandidates.contains(runStr)) {
+        rawReleaseTitleCandidates.add(runStr);
+      }
+    }
+    if (headSha.isNotEmpty && !rawReleaseTitleCandidates.contains(headSha)) {
+      rawReleaseTitleCandidates.add(headSha);
+    }
+
+    return APKDetails(
+      version,
+      selectedFilteredApks,
+      getAppNames(standardUrl),
+      releaseDate: releaseDate,
+      changeLog: changeLog.isEmpty ? null : changeLog,
+      allAssetUrls: selectedAllAssetUrls,
+      rawReleaseTitleCandidates: rawReleaseTitleCandidates,
+      apkSizeBytes: apkSizeBytes,
+    );
   }
 
   AppNames getAppNames(String standardUrl) {

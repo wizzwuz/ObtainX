@@ -879,6 +879,10 @@
     "version_variant_differs": "Different build variant",
     "version_variant_differs_detail": "This source release targets a different app or device variant. Select a matching APK or review the source before switching variants.",
     "version_commit_ancestry_detail": "Build order verified using GitHub commit history.",
+    "getApkFromActionTab": "Get APK from Actions tab",
+    "getApkFromActionTabTooltip": "Extract downloadable APK artifacts from GitHub Actions workflow runs instead of Releases (requires GitHub Personal Access Token)",
+    "githubTokenRequiredForActionTab": "A GitHub Personal Access Token is required to extract APKs from the Actions tab. Please configure your token in Settings or Source Settings.",
+    "noActionTabArtifactsFound": "No active APK artifacts found in the GitHub Actions tab for this repository.",
     "action": {
         "one": "Action",
         "other": "Actions"

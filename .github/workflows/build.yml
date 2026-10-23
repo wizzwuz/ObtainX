@@ -1,11 +1,9 @@
 name: Build APKs
 
 on:
-  # push:
-  #  branches: [main]
-  #  tags: ['v*']
-  # pull_request:
-  #  branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -18,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-java@v6
         with:
@@ -57,13 +57,49 @@ jobs:
 
       - name: Set up signing
         run: |
-          echo "$KEYSTORE_B64" | base64 -d > android/app/bikram_signer.p12
+          mkdir -p android/app
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "Using keystore from secrets"
+            echo "$KEYSTORE_B64" | base64 -d > android/app/bikram_signer.p12
+            ACTUAL_PASS="$KS_PASS"
+            ACTUAL_ALIAS="$K_ALIAS"
+            ACTUAL_FILE="bikram_signer.p12"
+          else
+            echo "Setting up persistent release keystore"
+            ACTUAL_FILE="release.jks"
+            ACTUAL_PASS="obtainx_release_pass"
+            ACTUAL_ALIAS="obtainx"
+            if [ ! -f "android/app/$ACTUAL_FILE" ]; then
+              echo "Generating permanent release keystore..."
+              keytool -genkeypair -v \
+                -keystore "android/app/$ACTUAL_FILE" \
+                -alias "$ACTUAL_ALIAS" \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -storepass "$ACTUAL_PASS" \
+                -keypass "$ACTUAL_PASS" \
+                -dname "CN=ObtainX, OU=Mobile, O=ObtainX, L=World, ST=Global, C=US"
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add "android/app/$ACTUAL_FILE"
+              git commit -m "chore: persist release signing keystore for consistent APK releases [skip ci]" || true
+              git push origin HEAD:${{ github.ref_name }} || true
+            else
+              echo "Permanent release keystore already exists. Reusing existing key."
+            fi
+          fi
+
           cat > android/key.properties <<PROPS
-          storePassword=$KS_PASS
-          keyPassword=$KS_PASS
-          keyAlias=$K_ALIAS
-          storeFile=bikram_signer.p12
+          storePassword=$ACTUAL_PASS
+          keyPassword=$ACTUAL_PASS
+          keyAlias=$ACTUAL_ALIAS
+          storeFile=$ACTUAL_FILE
           PROPS
+
+          echo "SIGNING_KS_FILE=$ACTUAL_FILE" >> $GITHUB_ENV
+          echo "SIGNING_PASS=$ACTUAL_PASS" >> $GITHUB_ENV
+          echo "SIGNING_ALIAS=$ACTUAL_ALIAS" >> $GITHUB_ENV
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
           KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -113,16 +149,13 @@ jobs:
             python3 zipalign.py --page-size 16 --pad-like-apksigner --replace "$f" "$f.aln"
             mv -f "$f.aln" "$f"
             "$APKSIGNER" sign --alignment-preserved \
-              --ks android/app/bikram_signer.p12 --ks-pass "pass:$KS_PASS" \
-              --ks-key-alias "$K_ALIAS" --key-pass "pass:$KS_PASS" "$f"
+              --ks "android/app/$SIGNING_KS_FILE" --ks-pass "pass:$SIGNING_PASS" \
+              --ks-key-alias "$SIGNING_ALIAS" --key-pass "pass:$SIGNING_PASS" "$f"
             mv "$f" "$APK_DIR/ObtainX-v${VERSION}-fdroid-${arch}.apk"
           done
 
           rm -f "$APK_DIR"/*.sha1 "$APK_DIR"/*.idsig
           ls -l "$APK_DIR"
-        env:
-          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-          K_ALIAS: ${{ secrets.KEY_ALIAS }}
 
       - name: Generate GitHub Artifact Attestations
         uses: actions/attest@v4

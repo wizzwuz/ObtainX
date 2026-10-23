@@ -77,7 +77,11 @@ class Codeberg extends AppSource {
       .additionalSourceAppSpecificSettingFormItems
       .map(
         (row) => row
-            .where((item) => item.key != GitHub.buildVerificationModeKey)
+            .where(
+              (item) =>
+                  item.key != GitHub.buildVerificationModeKey &&
+                  item.key != 'getApkFromActionTab',
+            )
             .toList(),
       )
       .where((row) => row.isNotEmpty)
