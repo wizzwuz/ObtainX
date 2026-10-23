@@ -2216,7 +2216,9 @@ class HttpService {
   HttpService({this.responseTimeout = sourceResponseTimeout});
 
   HttpClient createHttpClient(bool insecure) {
-    final client = HttpClient()..connectionTimeout = sourceConnectionTimeout;
+    final client = HttpClient()
+      ..connectionTimeout = sourceConnectionTimeout
+      ..idleTimeout = const Duration(minutes: 1);
     if (insecure) {
       client.badCertificateCallback =
           (X509Certificate cert, String host, int port) => true;

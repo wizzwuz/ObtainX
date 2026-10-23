@@ -53,7 +53,7 @@ export 'apps_provider_lifecycle.dart';
 export 'apps_provider_updates.dart';
 
 // Named constants for magic numbers and hardcoded values
-const int _defaultRetries = 3;
+const int _defaultRetries = 5;
 const int _retryDelaySeconds = 5;
 const int _partialHashCheckStartingSize = 1024;
 const int _partialHashCheckLowerLimit = 128;
@@ -358,7 +358,16 @@ Future<File> downloadFileWithRetry(
     if (retries > 0 &&
         (e is ClientException ||
             e is SocketException ||
+            e is HttpException ||
+            e is TlsException ||
+            e is HandshakeException ||
             e is TimeoutException)) {
+      unawaited(
+        logs?.add(
+          'Download interrupted ($e). Resuming download ($retries retries left)...',
+          level: LogLevel.warning,
+        ),
+      );
       await Future.delayed(const Duration(seconds: _retryDelaySeconds));
       return await downloadFileWithRetry(
         url,
@@ -913,7 +922,7 @@ Future<File> _downloadFile(
     final downloadBuffer = BytesBuilder();
     try {
       await response
-          .timeout(sourceResponseTimeout)
+          .timeout(const Duration(seconds: 90))
           .map((chunk) {
             cancellationToken?.throwIfCancelled();
             received += chunk.length;
