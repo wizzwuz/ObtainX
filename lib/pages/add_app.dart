@@ -1460,8 +1460,9 @@ class AddAppPageState extends State<AddAppPage> {
             inferAppIdIfOptional: inferAppIdIfOptional,
           );
           // Only download the APK here if you need to for the package ID
+          _PackageIdDetectionResult? detectionResult;
           if (isTempId(app) && app.additionalSettings['trackOnly'] != true) {
-            final detectionResult = await showDownloadApkToIdentifyAppDialog(
+            detectionResult = await showDownloadApkToIdentifyAppDialog(
               app,
             );
             if (detectionResult == null) {
@@ -1500,6 +1501,43 @@ class AddAppPageState extends State<AddAppPage> {
             app.copyWith(categories: pickedCategories),
           );
           appWasAdded = true;
+          if (detectionResult?.downloadedArtifact != null &&
+              app.additionalSettings['trackOnly'] != true &&
+              context.mounted) {
+            final artifact = detectionResult!.downloadedArtifact!;
+            if (artifact is DownloadedApk) {
+              artifact.appId = app.listingKey;
+            } else if (artifact is DownloadedDir) {
+              artifact.appId = app.listingKey;
+            }
+            final bool? shouldInstall = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: Text(tr('installAppPrompt', args: [app!.finalName])),
+                contentPadding: appDialogContentPadding,
+                content: Text(tr('installAppPromptExplanation')),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: Text(tr('cancel')),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: Text(tr('install')),
+                  ),
+                ],
+              ),
+            );
+            if (shouldInstall == true) {
+              unawaited(
+                appsProvider.installDownloadedArtifact(
+                  artifact,
+                  notificationsProvider: notificationsProvider,
+                  allowUserInteraction: true,
+                ),
+              );
+            }
+          }
         }
         if (app != null) {
           if (!mounted) return;

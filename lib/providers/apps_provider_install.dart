@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:android_intent_plus/flag.dart';
+import 'package:collection/collection.dart';
 import 'package:android_package_manager/android_package_manager.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:easy_localization/easy_localization.dart';
@@ -766,27 +767,59 @@ extension AppsProviderInstall on AppsProvider {
       String? parsedArchivePath;
       final originalAssetName = app.apkUrls[app.preferredApkIndex].key
           .toLowerCase();
-      final isAPK = downloadedFile.path.toLowerCase().endsWith('.apk');
-      final isXAPK = downloadedFile.path.toLowerCase().endsWith('.xapk');
+      final bool isActionTab =
+          app.additionalSettings['getApkFromActionTab'] == true ||
+          downloadUrl.contains('/actions/artifacts/');
       final isTarball =
           originalAssetName.endsWith('.tar.gz') ||
           originalAssetName.endsWith('.tgz') ||
           originalAssetName.endsWith('.tar.bz2') ||
           originalAssetName.endsWith('.tar.xz');
+      final isXAPK = downloadedFile.path.toLowerCase().endsWith('.xapk');
+      final isExplicitZip =
+          downloadedFile.path.toLowerCase().endsWith('.zip') ||
+          originalAssetName.endsWith('.zip');
+      bool isAPK = !isActionTab &&
+          !isExplicitZip &&
+          !isTarball &&
+          !isXAPK &&
+          downloadedFile.path.toLowerCase().endsWith('.apk');
       Directory? apkDir;
       if (isAPK) {
         parsedArchivePath = downloadedFile.path;
         newInfo = await packageManager.getPackageArchiveInfo(
           archiveFilePath: downloadedFile.path,
         );
-      } else {
-        final String apkDirPath = '${downloadedFile.path}-dir';
-        if (isTarball) {
-          await extractTarballFile(downloadedFile.path, apkDirPath);
-        } else {
-          await unzipFile(downloadedFile.path, apkDirPath);
+        // If package manager couldn't parse the file directly, check if it's
+        // actually a ZIP archive containing APK(s) (e.g. from GitHub Actions).
+        if (newInfo == null) {
+          try {
+            final String testDirPath = '${downloadedFile.path}-dir';
+            await unzipFile(downloadedFile.path, testDirPath);
+            final testDir = Directory(testDirPath);
+            final foundApks = testDir
+                .listSync(recursive: true)
+                .where((e) => AppSource.isApkOrContainerFile(e.path))
+                .toList();
+            if (foundApks.isNotEmpty) {
+              isAPK = false;
+              apkDir = testDir;
+            } else {
+              testDir.deleteSync(recursive: true);
+            }
+          } catch (_) {}
         }
-        apkDir = Directory(apkDirPath);
+      }
+      if (!isAPK) {
+        if (apkDir == null) {
+          final String apkDirPath = '${downloadedFile.path}-dir';
+          if (isTarball) {
+            await extractTarballFile(downloadedFile.path, apkDirPath);
+          } else {
+            await unzipFile(downloadedFile.path, apkDirPath);
+          }
+          apkDir = Directory(apkDirPath);
+        }
         var apks = apkDir
             .listSync(recursive: true)
             .where((e) => AppSource.isApkOrContainerFile(e.path))
@@ -989,10 +1022,14 @@ extension AppsProviderInstall on AppsProvider {
       await isDowngradeModuleInstalled();
 
   Future<void> unzipFile(String filePath, String destinationPath) async {
-    await ZipFile.extractToDirectory(
-      zipFile: File(filePath),
-      destinationDir: Directory(destinationPath),
-    );
+    try {
+      await ZipFile.extractToDirectory(
+        zipFile: File(filePath),
+        destinationDir: Directory(destinationPath),
+      );
+    } catch (_) {
+      await extractZipOffIsolate(filePath, destinationPath);
+    }
   }
 
   Future<void> extractTarballFile(
@@ -1013,6 +1050,7 @@ extension AppsProviderInstall on AppsProvider {
     /// See [installApk]'s param of the same name. Verification/scanning runs
     /// once here against the container before any split part is installed.
     bool showMalwareScanDialog = false,
+    bool allowUserInteraction = false,
   }) async {
     // Verify + scan the container once up front; the split-APK installApk calls
     // below pass skipMalwareScan so it is not repeated per part.
@@ -1107,20 +1145,82 @@ extension AppsProviderInstall on AppsProvider {
         return somethingInstalled;
       }
 
-      apkFiles = _preferMatchingApk(apkFiles, dir.appId).cast<File>().toList();
-
       if (apkFiles.isEmpty) {
         throw NoAPKError();
       }
 
+      final bool isXapk = dir.type == DownloadedDirType.xapk;
+      File selectedApk;
+      List<File> splitApks = [];
+
+      if (isXapk) {
+        apkFiles = _preferMatchingApk(apkFiles, dir.appId).cast<File>().toList();
+        selectedApk = apkFiles[0];
+        splitApks = apkFiles.sublist(1);
+      } else {
+        final App? appEntry = apps[dir.appId]?.app;
+        String? filterRegEx =
+            appEntry?.settings.getStringOrNull('zippedApkFilterRegEx');
+        filterRegEx ??= appEntry?.settings.getStringOrNull('apkFilterRegEx');
+        if (filterRegEx != null && filterRegEx.isNotEmpty) {
+          final reg = RegExp(filterRegEx);
+          final filtered = apkFiles
+              .where((f) => reg.hasMatch(f.path.split('/').last))
+              .toList();
+          if (filtered.isNotEmpty) {
+            apkFiles = filtered;
+          }
+        }
+
+        final List<String> archs =
+            (await DeviceInfoPlugin().androidInfo).supportedAbis;
+
+        if (apkFiles.length == 1) {
+          selectedApk = apkFiles.first;
+        } else {
+          File? archMatch;
+          for (final abi in archs) {
+            final reg = RegExp('.*$abi.*', caseSensitive: false);
+            archMatch = apkFiles.firstWhereOrNull(
+              (f) => reg.hasMatch(f.path.split('/').last),
+            );
+            if (archMatch != null) break;
+          }
+
+          final navigator = globalNavigatorKey.currentState;
+          if (allowUserInteraction && navigator != null && navigator.mounted) {
+            final File? chosen = await showDialog<File>(
+              context: navigator.context,
+              builder: (ctx) {
+                final dialog = ZipApkPickerDialog(
+                  apkFiles: apkFiles,
+                  extractedDir: dir.extracted,
+                  appName: apps[dir.appId]?.name ?? dir.appId,
+                  archs: archs,
+                  initialSelection: archMatch ?? apkFiles.first,
+                );
+                return toastTheme != null
+                    ? Theme(data: toastTheme, child: dialog)
+                    : dialog;
+              },
+            );
+            if (chosen == null) {
+              return false;
+            }
+            selectedApk = chosen;
+          } else {
+            selectedApk = archMatch ?? apkFiles.first;
+          }
+        }
+      }
+
       try {
         final wasInstalled = await installApk(
-          DownloadedApk(dir.appId, apkFiles[0], release: dir.release),
+          DownloadedApk(dir.appId, selectedApk, release: dir.release),
           firstInstallNotificationsProvider,
           needsBGWorkaround: needsBGWorkaround,
           installOptions: installOptions,
-          additionalAPKs: apkFiles
-              .sublist(1)
+          additionalAPKs: splitApks
               .map((a) => DownloadedApk(dir.appId, a, release: dir.release))
               .toList(),
           // Container already verified/scanned above.
@@ -1333,6 +1433,39 @@ extension AppsProviderInstall on AppsProvider {
       apps[file.appId]!.app,
     ], attemptToCorrectInstallStatus: !installed);
     return installed;
+  }
+
+  Future<bool> installDownloadedArtifact(
+    Object downloadedArtifact, {
+    NotificationsProvider? notificationsProvider,
+    ThemeData? toastTheme,
+    bool allowUserInteraction = true,
+  }) async {
+    final bool shizukuPretendToBeGooglePlay =
+        settingsProvider.shizukuPretendToBeGooglePlay;
+    if (downloadedArtifact is DownloadedApk) {
+      return await installApk(
+        downloadedArtifact,
+        notificationsProvider,
+        installOptions: {
+          'shizukuPretendToBeGooglePlay': shizukuPretendToBeGooglePlay,
+        },
+        showMalwareScanDialog: allowUserInteraction,
+        toastTheme: toastTheme,
+      );
+    } else if (downloadedArtifact is DownloadedDir) {
+      return await installApkDir(
+        downloadedArtifact,
+        notificationsProvider,
+        installOptions: {
+          'shizukuPretendToBeGooglePlay': shizukuPretendToBeGooglePlay,
+        },
+        showMalwareScanDialog: allowUserInteraction,
+        toastTheme: toastTheme,
+        allowUserInteraction: allowUserInteraction,
+      );
+    }
+    return false;
   }
 
   Future<void> _shareWithVerifiedApps(
@@ -2021,6 +2154,7 @@ extension AppsProviderInstall on AppsProvider {
             },
             showMalwareScanDialog: allowUserInteraction,
             toastTheme: toastTheme,
+            allowUserInteraction: allowUserInteraction,
           );
         }
       }

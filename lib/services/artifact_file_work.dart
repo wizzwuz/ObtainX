@@ -82,3 +82,39 @@ void _extractTarball(String path, String destination) {
     temporaryDirectory?.deleteSync(recursive: true);
   }
 }
+
+Future<void> extractZipOffIsolate(String path, String destination) {
+  return Isolate.run(
+    () => _extractZip(path, destination),
+    debugName: 'artifact-zip-extraction',
+  );
+}
+
+void _extractZip(String path, String destination) {
+  final input = archive.InputFileStream(path);
+  try {
+    final archive.Archive contents = archive.ZipDecoder().decodeStream(input);
+    final outputDirectory = Directory(destination).absolute;
+    outputDirectory.createSync(recursive: true);
+    final root = outputDirectory.uri;
+    for (final entry in contents) {
+      if (!entry.isFile || entry.isSymbolicLink) continue;
+      final target = root.resolve(entry.name.replaceAll('\\', '/'));
+      if (target.scheme != root.scheme ||
+          target.host != root.host ||
+          !target.path.startsWith(root.path)) {
+        throw const FormatException('Archive entry is outside its destination');
+      }
+      final file = File.fromUri(target);
+      file.parent.createSync(recursive: true);
+      final output = archive.OutputFileStream(file.path);
+      try {
+        entry.writeContent(output);
+      } finally {
+        output.closeSync();
+      }
+    }
+  } finally {
+    input.closeSync();
+  }
+}

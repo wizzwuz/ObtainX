@@ -432,6 +432,8 @@
     "openSettings": "Открыть настройки",
     "downloadAPKToIdentifyAppQuestion": "Скачать APK для определения приложения?",
     "downloadAPKToIdentifyAppExplanation": "ObtainX не удалось определить ID пакета этого приложения по источнику. Чтобы добавить его как устанавливаемое, ObtainX нужно один раз скачать выбранный APK и прочитать его ID пакета. Выберите режим «только отслеживание», чтобы добавить его без скачивания сейчас.",
+    "installAppPrompt": "Установить {}?",
+    "installAppPromptExplanation": "APK найден и готов к установке.",
     "shareAsFile": "Поделиться как файлом",
     "izzyOnDroid": "IzzyOnDroid",
     "categoryFilterCycleHint": "Нажмите для переключения: (+) Включить, (x) Исключить, повторное нажатие - сброс",

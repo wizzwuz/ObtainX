@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:obtainium/components/ui_widgets.dart';
@@ -360,6 +362,140 @@ class MalwareScanWarningDialog extends StatelessWidget {
             foregroundColor: Theme.of(context).colorScheme.error,
           ),
           child: Text(tr('installAnyway')),
+        ),
+      ],
+    );
+  }
+}
+
+class ZipApkPickerDialog extends StatefulWidget {
+  const ZipApkPickerDialog({
+    super.key,
+    required this.apkFiles,
+    required this.extractedDir,
+    required this.appName,
+    required this.archs,
+    this.initialSelection,
+  });
+
+  final List<File> apkFiles;
+  final Directory extractedDir;
+  final String appName;
+  final List<String> archs;
+  final File? initialSelection;
+
+  @override
+  State<ZipApkPickerDialog> createState() => _ZipApkPickerDialogState();
+}
+
+class _ZipApkPickerDialogState extends State<ZipApkPickerDialog> {
+  File? _selectedFile;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedFile = widget.initialSelection ?? widget.apkFiles.first;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isTV = context.read<SettingsProvider>().isTV;
+    return AlertDialog(
+      scrollable: true,
+      title: Text(tr('pickAnAPK')),
+      content: RadioGroup<String>(
+        groupValue: _selectedFile?.path,
+        onChanged: (String? val) {
+          if (val != null) {
+            setState(() {
+              _selectedFile = widget.apkFiles.firstWhere(
+                (f) => f.path == val,
+                orElse: () => widget.apkFiles.first,
+              );
+            });
+          }
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              tr(
+                'appHasMoreThanOnePackage',
+                args: [widget.appName],
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (isTV)
+              ...widget.apkFiles.asMap().entries.map((entry) {
+                final file = entry.value;
+                final fileName = file.path.split('/').last;
+                final bool matchesArch = widget.archs.any(
+                  (abi) => RegExp('.*$abi.*', caseSensitive: false).hasMatch(fileName),
+                );
+                return ListTile(
+                  autofocus: entry.key == 0,
+                  leading: Radio<String>(value: file.path),
+                  title: Text(fileName),
+                  subtitle: matchesArch && widget.archs.isNotEmpty
+                      ? Text(tr('deviceSupportsXArch', args: [widget.archs.first]))
+                      : null,
+                  selected: _selectedFile?.path == file.path,
+                  onTap: () {
+                    setState(() {
+                      _selectedFile = file;
+                    });
+                  },
+                );
+              })
+            else
+              ...widget.apkFiles.map((file) {
+                final fileName = file.path.split('/').last;
+                final bool matchesArch = widget.archs.any(
+                  (abi) => RegExp('.*$abi.*', caseSensitive: false).hasMatch(fileName),
+                );
+                return RadioListTile<String>(
+                  title: Text(
+                    fileName,
+                    style: matchesArch
+                        ? const TextStyle(fontWeight: FontWeight.bold)
+                        : null,
+                  ),
+                  subtitle: matchesArch && widget.archs.isNotEmpty
+                      ? Text(tr('deviceSupportsXArch', args: [widget.archs.first]))
+                      : null,
+                  value: file.path,
+                );
+              }),
+            if (widget.archs.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text(
+                widget.archs.length == 1
+                    ? tr('deviceSupportsXArch', args: [widget.archs[0]])
+                    : tr('deviceSupportsFollowingArchs') +
+                        list2FriendlyString(
+                          widget.archs.map((e) => '\'$e\'').toList(),
+                        ),
+                style: const TextStyle(
+                  fontStyle: FontStyle.italic,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(null),
+          child: Text(tr('cancel')),
+        ),
+        FilledButton(
+          autofocus: isTV,
+          onPressed: _selectedFile != null
+              ? () => Navigator.of(context).pop(_selectedFile)
+              : null,
+          child: Text(tr('install')),
         ),
       ],
     );

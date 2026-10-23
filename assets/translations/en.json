@@ -443,6 +443,8 @@
     "openSettings": "Open settings",
     "downloadAPKToIdentifyAppQuestion": "Download APK to identify app?",
     "downloadAPKToIdentifyAppExplanation": "ObtainX could not determine this app's package ID from the source. To add it as an installable app, ObtainX needs to download the selected APK once and read its package ID. Choose track-only to add it without downloading now.",
+    "installAppPrompt": "Install {}?",
+    "installAppPromptExplanation": "The APK has been found and is ready to install.",
     "shareAsFile": "Share as file",
     "izzyOnDroid": "IzzyOnDroid",
     "categoryFilterCycleHint": "Tap to cycle: (+) Include, (x) Exclude, tap again to reset",
